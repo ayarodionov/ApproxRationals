@@ -1,6 +1,6 @@
 # ApproxRationals.jl
 
-[![CI](https://github.com/ayarodionov/ApproxRationals/actions/workflows/CI.yml/badge.svg)](https://github.com/ayarodionov/ApproxRationals/actions/workflows/CI.yml)
+[![CI](https://github.com/ayarodionov/ApproxRationals.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/ayarodionov/ApproxRationals.jl/actions/workflows/CI.yml)
 
 Rational arithmetic with a **fixed global precision**.
 
