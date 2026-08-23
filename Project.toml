@@ -1,0 +1,14 @@
+name = "ApproxRationals"
+uuid = "e53d5c3f-6fb6-42e9-96ec-6d0b8770634f"
+authors = ["ayarodionov <ayarodionov@gmail.com>"]
+version = "0.1.0"
+
+[compat]
+julia = "1.6"
+
+[extras]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "Random"]
