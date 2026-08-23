@@ -61,3 +61,46 @@ fixpoint = (5 // 13) / (1 - 7 // 11)          # = 55//52
 @printf("fixed point 55//52 = %.20f, error %.3e\n",
         Float64(fixpoint), Float64(abs(approxerror(x, fixpoint))))
 println("(exact Rational{BigInt} would need denominators with ~10_000 digits here)")
+
+println()
+println("=" ^ 72)
+println("5. Error-controlled rounding: reproducing Table 1 of the 2001 paper")
+println("=" ^ 72)
+# sin(pi/6 + 2*pi*m) by Taylor series, with pi replaced by 355/113, summing
+# until a term drops below 1e-7. The exact answer is 1/2 for every m.
+function taylorsin(x)
+    s = zero(x)
+    t = x
+    k = 1
+    while abs(float(t)) >= 1e-7
+        s += t
+        k += 2
+        t = -t * x * x / ARational((k - 1) * k)
+    end
+    return s
+end
+
+schemes = ["I    exact"                => nothing,
+           "II   Δ=1e-8"               => ErrorBound(abstol = 1 // 10^8, threshold = 9),
+           "III  Δ=δ=1e-8"             => ErrorBound(abstol = 1 // 10^8,
+                                                     reltol = 1 // 10^8, threshold = 9),
+           "IV   δ=1e-8"               => ErrorBound(reltol = 1 // 10^8, threshold = 9),
+           "V    fixed slash, den≤1e6" => SizeBound(10^6)]
+
+for (label, scheme) in schemes
+    print(rpad(label, 26))
+    for m in 0:6
+        # "exact" is modelled by a bound so large nothing is ever rounded away
+        active = scheme === nothing ? SizeBound(big(10)^400) : scheme
+        r = with_rounding(active) do
+            x = ARational(355, 113) / ARational(6) + ARational(2 * 355, 113) * ARational(m)
+            taylorsin(x)
+        end
+        s = ndigits(numerator(r)) + ndigits(denominator(r))
+        @printf("%8.0e/%-3d", abs(Float64(r) - 0.5), s)
+    end
+    println()
+end
+println("columns are m = 0..6, each as  error/digits-in-the-fraction")
+println("Compare Table 1: exact arithmetic blows up in size, the Δ variants do not,")
+println("and fixing only the relative error (IV) degrades just as the paper reports.")

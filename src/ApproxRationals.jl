@@ -23,7 +23,9 @@ x = ARational(1, 3) + ARational(1, 7)
 module ApproxRationals
 
 export ARational,
-       bestapprox, convergents,
+       bestapprox, approxwithin, convergents,
+       RoundingScheme, SizeBound, ErrorBound,
+       roundingscheme, setrounding!, with_rounding,
        maxdenominator, setmaxdenominator!, with_maxdenominator,
        approxerror, isexact
 
@@ -34,33 +36,147 @@ include("bestapprox.jl")
 # ---------------------------------------------------------------------------
 
 const DEFAULT_BITS = 64
-const MAXDEN = Ref{BigInt}(big(2)^DEFAULT_BITS)
 
 """
-    maxdenominator() -> BigInt
+    RoundingScheme
 
-Current global denominator bound. Every `ARational` produced by arithmetic has
-a denominator no larger than this.
+How a rational is rounded after every operation. Two schemes are available,
+and they are duals of each other:
+
+- [`SizeBound`](@ref) caps the denominator. Memory and per-operation cost are
+  then fixed and known in advance; the error follows from the cap.
+- [`ErrorBound`](@ref) caps the error. The accuracy of every single operation
+  is then guaranteed; the size follows from the tolerance.
+
+Neither dominates. Pick the one whose guarantee you actually need.
 """
-maxdenominator() = MAXDEN[]
+abstract type RoundingScheme end
 
 """
-    setmaxdenominator!(n::Integer) -> BigInt
+    SizeBound(maxden::Integer)
 
-Set the global denominator bound to `n` and return the previous value.
+Round to the best rational with denominator at most `maxden`, using
+[`bestapprox`](@ref). This is the *fixed-slash* scheme of Matula and Kornerup,
+refined to admit semiconvergents so the result is a true best approximation.
 """
-function setmaxdenominator!(n::Integer)
-    n < 1 && throw(ArgumentError("denominator bound must be >= 1, got $n"))
-    old = MAXDEN[]
-    MAXDEN[] = big(n)
+struct SizeBound <: RoundingScheme
+    maxden::BigInt
+    function SizeBound(maxden::Integer)
+        maxden < 1 && throw(ArgumentError("denominator bound must be >= 1, got $maxden"))
+        return new(big(maxden))
+    end
+end
+
+"""
+    ErrorBound(; abstol = nothing, reltol = nothing, threshold = 0)
+
+Round to the first continued-fraction convergent meeting the given tolerances,
+using [`approxwithin`](@ref) — the scheme of Litvinov, Rodionov and Chourkin.
+
+- `abstol` (the paper's `Δ`) bounds `|rounded − exact|`.
+- `reltol` (the paper's `δ`) bounds `|rounded − exact| / |exact|`.
+- `nothing` means an infinite tolerance, i.e. that criterion is not applied;
+  at least one of the two must be given. Both criteria must hold when both are.
+- A tolerance of `0` means exact: that operand is never rounded.
+- `threshold` (the paper's `M`) leaves a result alone entirely while its
+  numerator and denominator both have at most that many decimal digits, so
+  short exact fractions survive a coarse tolerance.
+
+Tolerances are converted to exact rationals, so `ErrorBound(abstol = 1e-8)`
+uses the exact binary value of that float. Pass a `Rational` for a decimal
+tolerance: `ErrorBound(abstol = 1//10^8)`.
+
+Unlike `SizeBound` this puts no cap on the denominator, but it does not need
+one: an absolute tolerance `Δ` holds denominators to roughly `1/sqrt(Δ)`.
+"""
+struct ErrorBound <: RoundingScheme
+    abstol::Union{Nothing,Rational{BigInt}}
+    reltol::Union{Nothing,Rational{BigInt}}
+    threshold::Int
+    function ErrorBound(; abstol = nothing, reltol = nothing, threshold::Integer = 0)
+        at = _tolerance(abstol, "abstol")
+        rt = _tolerance(reltol, "reltol")
+        at === nothing && rt === nothing &&
+            throw(ArgumentError("give abstol, reltol, or both; with neither, nothing is rounded"))
+        threshold < 0 && throw(ArgumentError("threshold must be >= 0, got $threshold"))
+        return new(at, rt, Int(threshold))
+    end
+end
+
+_tolerance(::Nothing, ::AbstractString) = nothing
+function _tolerance(x::Real, name::AbstractString)
+    x < 0 && throw(ArgumentError("$name must be >= 0, got $x"))
+    isinf(x) && return nothing
+    isnan(x) && throw(ArgumentError("$name must not be NaN"))
+    return Rational{BigInt}(x)
+end
+
+const SCHEME = Ref{RoundingScheme}(SizeBound(big(2)^DEFAULT_BITS))
+
+"""
+    roundingscheme() -> RoundingScheme
+
+The scheme currently applied after every operation.
+"""
+roundingscheme() = SCHEME[]
+
+"""
+    setrounding!(s::RoundingScheme) -> RoundingScheme
+
+Install `s` as the global rounding scheme and return the previous one, so it
+can be restored with another `setrounding!`.
+"""
+function setrounding!(s::RoundingScheme)
+    old = SCHEME[]
+    SCHEME[] = s
     return old
 end
 
 """
+    with_rounding(f, s::RoundingScheme)
+
+Run `f()` under scheme `s`, restoring the previous scheme afterwards (also on
+error).
+
+```julia
+with_rounding(ErrorBound(abstol = 1//10^20)) do
+    sum(ARational(1, k) for k in 1:1000)
+end
+```
+"""
+function with_rounding(f, s::RoundingScheme)
+    old = setrounding!(s)
+    try
+        return f()
+    finally
+        SCHEME[] = old
+    end
+end
+
+# --- size-bound conveniences ----------------------------------------------
+
+"""
+    maxdenominator() -> BigInt
+
+Current global denominator bound. Throws if the active scheme bounds error
+rather than size — see [`roundingscheme`](@ref).
+"""
+maxdenominator() = _maxden(SCHEME[])
+_maxden(s::SizeBound) = s.maxden
+_maxden(::ErrorBound) = throw(ArgumentError(
+    "the active rounding scheme bounds error, not denominator size; see roundingscheme()"))
+
+"""
+    setmaxdenominator!(n::Integer) -> RoundingScheme
+
+Switch to `SizeBound(n)` and return the previous scheme.
+"""
+setmaxdenominator!(n::Integer) = setrounding!(SizeBound(n))
+
+"""
     with_maxdenominator(f, n::Integer)
 
-Run `f()` with the denominator bound temporarily set to `n`, restoring the
-previous bound afterwards (also on error).
+Run `f()` under `SizeBound(n)`, restoring the previous scheme afterwards.
 
 ```julia
 with_maxdenominator(10^12) do
@@ -68,14 +184,7 @@ with_maxdenominator(10^12) do
 end
 ```
 """
-function with_maxdenominator(f, n::Integer)
-    old = setmaxdenominator!(n)
-    try
-        return f()
-    finally
-        MAXDEN[] = old
-    end
-end
+with_maxdenominator(f, n::Integer) = with_rounding(f, SizeBound(n))
 
 # ---------------------------------------------------------------------------
 # the type
@@ -100,15 +209,82 @@ struct ARational{T<:Integer} <: Real
     ARational{T}(n::T, d::T, ::Val{:raw}) where {T<:Integer} = new{T}(n, d)
 end
 
-# Denominator bound usable for element type T (a value of T can never exceed
-# typemax(T), so clamp there for fixed-width integers).
-_denlimit(::Type{BigInt}) = MAXDEN[]
-_denlimit(::Type{T}) where {T<:Integer} = min(MAXDEN[], big(typemax(T)))
+# Hard cap the element type imposes. Both parts must be storable in T, so it is
+# not enough to hold the denominator under typemax(T): a value of magnitude v
+# has a numerator about v times its denominator, and that has to fit too.
+_typecap(::Type{BigInt}, ::Integer, ::Integer) = nothing
+function _typecap(::Type{T}, n::Integer, d::Integer) where {T<:Integer}
+    m = big(typemax(T))
+    scale = cld(abs(big(n)), big(d)) + 1        # an upper bound on |n/d| + 1
+    return max(big(1), fld(m, scale))
+end
+
+# --- applying a scheme to one reduced fraction ------------------------------
+
+function _round(s::SizeBound, ::Type{T}, n::W, d::W) where {T<:Integer,W<:Integer}
+    cap = _typecap(T, n, d)
+    lim = cap === nothing ? s.maxden : min(s.maxden, cap)
+    return d > lim ? bestapprox(n, d, W(lim)) : (n, d)
+end
+
+function _round(s::ErrorBound, ::Type{T}, n::W, d::W) where {T<:Integer,W<:Integer}
+    cap = _typecap(T, n, d)
+    if !(s.threshold > 0 && ndigits(n) <= s.threshold && ndigits(d) <= s.threshold)
+        B = _errbound(s, n, d)
+        if B !== nothing
+            if W === BigInt || B <= big(typemax(W))
+                n, d = approxwithin(n, d, W(B))
+            else
+                # The tolerance is finer than this element type can express;
+                # give the closest thing it can hold instead of overflowing.
+                n, d = bestapprox(n, d, W(cap))
+            end
+        end
+    end
+    # The error criterion caps no denominator, so a fixed-width element type
+    # still needs its own net.
+    if cap !== nothing && d > W(cap)
+        n, d = bestapprox(n, d, W(cap))
+    end
+    return (n, d)
+end
+
+"""
+    _errbound(s::ErrorBound, n, d) -> BigInt or nothing
+
+The `B` to hand [`approxwithin`](@ref) so that `n/d` is rounded within every
+tolerance in `s`; `nothing` when `n/d` must be kept exactly.
+
+`|err| <= 1/B` is the guarantee, so an absolute tolerance `Δ` needs
+`B >= 1/Δ`, and a relative tolerance `δ` needs `B >= q/(δ·|p|)`. Requiring both
+means taking the larger.
+"""
+function _errbound(s::ErrorBound, n::Integer, d::Integer)
+    B = big(1)
+    if s.abstol !== nothing
+        iszero(s.abstol) && return nothing
+        B = max(B, cld(denominator(s.abstol), numerator(s.abstol)))
+    end
+    if s.reltol !== nothing
+        iszero(s.reltol) && return nothing
+        iszero(n) && return nothing                 # zero is exact; no relative error
+        B = max(B, cld(big(d) * denominator(s.reltol),
+                       numerator(s.reltol) * abs(big(n))))
+    end
+    return B
+end
+
+# Can this scheme do its work for n/d inside an Int128?
+_fastok(s::SizeBound, ::BigInt, ::BigInt) = s.maxden <= _FAST_LIMIT
+function _fastok(s::ErrorBound, n::BigInt, d::BigInt)
+    B = _errbound(s, n, d)
+    return B === nothing || B <= _FAST_LIMIT
+end
 
 """
     _make(T, n, d)
 
-Reduce `n/d`, round it to the global precision, and wrap it as `ARational{T}`.
+Reduce `n/d`, round it under the active scheme, and wrap it as `ARational{T}`.
 `n` and `d` may be of a wider type than `T`.
 """
 function _make(::Type{T}, n::W, d::W) where {T<:Integer,W<:Integer}
@@ -121,10 +297,7 @@ function _make(::Type{T}, n::W, d::W) where {T<:Integer,W<:Integer}
         n = div(n, g)
         d = div(d, g)
     end
-    lim = W(_denlimit(T))
-    if d > lim
-        n, d = bestapprox(n, d, lim)
-    end
+    n, d = _round(SCHEME[], T, n, d)
     return ARational{T}(T(n), T(d), Val(:raw))
 end
 
@@ -132,8 +305,8 @@ end
 # in an Int128, the reduce-and-round step runs entirely in machine arithmetic.
 # The continued fraction is O(log N) divisions long, and running those on BigInt
 # costs far more than the allocations it saves — this is worth roughly a 5-10x
-# speedup at 32-64 bits of precision. `bestapprox` keeps every intermediate
-# under max(|p|, q) and widens its one triple product, so Int128 inputs are safe.
+# speedup at 32-64 bits of precision. Both kernels keep every intermediate under
+# max(|p|, q) and widen their few triple products, so Int128 inputs are safe.
 const _FAST_LIMIT = big(typemax(Int128))
 
 _fits_fast(x::BigInt) = -_FAST_LIMIT <= x <= _FAST_LIMIT
@@ -143,17 +316,15 @@ function _make(::Type{BigInt}, n::BigInt, d::BigInt)
     if d < 0
         n, d = -n, -d
     end
-    lim = MAXDEN[]
-    if lim <= _FAST_LIMIT && _fits_fast(n) && d <= _FAST_LIMIT
+    s = SCHEME[]
+    if _fits_fast(n) && d <= _FAST_LIMIT && _fastok(s, n, d)
         p, q = Int128(n), Int128(d)
         g = gcd(p, q)
         if !isone(g)
             p = div(p, g)
             q = div(q, g)
         end
-        if q > Int128(lim)
-            p, q = bestapprox(p, q, Int128(lim))
-        end
+        p, q = _round(s, BigInt, p, q)
         return ARational{BigInt}(BigInt(p), BigInt(q), Val(:raw))
     end
     g = gcd(n, d)
@@ -161,9 +332,7 @@ function _make(::Type{BigInt}, n::BigInt, d::BigInt)
         n = div(n, g)
         d = div(d, g)
     end
-    if d > lim
-        n, d = bestapprox(n, d, lim)
-    end
+    n, d = _round(s, BigInt, n, d)
     return ARational{BigInt}(n, d, Val(:raw))
 end
 
@@ -320,7 +489,9 @@ Base.convert(::Type{ARational{T}}, x::ARational{T}) where {T} = x
 Base.convert(::Type{ARational{T}}, x::Union{Integer,Rational,AbstractFloat,ARational}) where {T} =
     ARational{T}(x)
 
-(::Type{F})(x::ARational) where {F<:AbstractFloat} = F(x.num) / F(x.den)
+# Via Rational rather than F(num)/F(den): the parts can be far outside the
+# float's range even when their quotient sits comfortably inside it.
+(::Type{F})(x::ARational) where {F<:AbstractFloat} = F(x.num // x.den)
 Base.float(x::ARational) = Float64(x)
 Base.AbstractFloat(x::ARational) = Float64(x)
 Base.big(x::ARational) = BigFloat(x.num, precision = _workbits()) / BigFloat(x.den, precision = _workbits())
@@ -342,7 +513,7 @@ end
 
 Number of bits in the current denominator bound, i.e. `floor(log2(bound))`.
 """
-Base.precision(::Type{<:ARational}) = ndigits(MAXDEN[], base = 2) - 1
+Base.precision(::Type{<:ARational}) = ndigits(maxdenominator(), base = 2) - 1
 Base.precision(::ARational) = Base.precision(ARational)
 
 """
@@ -354,24 +525,26 @@ The second form restores the old precision when `f` returns.
 """
 function Base.setprecision(::Type{<:ARational}, bits::Integer; base::Integer = 2)
     bits < 1 && throw(ArgumentError("precision must be >= 1 bit, got $bits"))
-    old = Base.precision(ARational)
-    setmaxdenominator!(big(base)^bits)
-    return old
+    return setrounding!(SizeBound(big(base)^bits))
 end
 
 function Base.setprecision(f::Function, ::Type{A}, bits::Integer; base::Integer = 2) where {A<:ARational}
-    old = MAXDEN[]
-    try
-        setprecision(A, bits; base = base)
-        return f()
-    finally
-        MAXDEN[] = old
-    end
+    bits < 1 && throw(ArgumentError("precision must be >= 1 bit, got $bits"))
+    return with_rounding(f, SizeBound(big(base)^bits))
 end
 
 # working precision for the BigFloat-backed elementary functions: enough
 # headroom that the final rounding, not the float evaluation, is the error.
-_workbits() = 2 * ndigits(MAXDEN[], base = 2) + 32
+_workbits() = _workbits(SCHEME[])
+_workbits(s::SizeBound) = 2 * ndigits(s.maxden, base = 2) + 32
+function _workbits(s::ErrorBound)
+    B = big(1)
+    for tol in (s.abstol, s.reltol)
+        tol !== nothing && !iszero(tol) &&
+            (B = max(B, cld(denominator(tol), numerator(tol))))
+    end
+    return 2 * ndigits(B, base = 2) + 64
+end
 
 # ---------------------------------------------------------------------------
 # elementary functions: evaluated in BigFloat, rounded back

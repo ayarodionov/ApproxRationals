@@ -105,3 +105,59 @@ function convergents(p::Integer, q::Integer)
 end
 
 convergents(r::Rational) = convergents(numerator(r), denominator(r))
+
+"""
+    approxwithin(p::Integer, q::Integer, B::Integer) -> (n, d)
+
+First continued-fraction convergent `n/d` of `p/q` whose error is at most
+`1/B`, i.e. the *error-controlled* rounding of Litvinov, Rodionov and Chourkin.
+
+The stopping test never touches `p/q`. It leans on the standard bracket
+
+    1/(q_k·(q_k + q_{k+1}))  <  |p/q − p_k/q_k|  ≤  1/(q_k·q_{k+1})
+
+so the convergent `p_k/q_k` is accepted as soon as `q_k·q_{k+1} ≥ B`, which
+costs one multiplication per step instead of a comparison against the
+unrounded value. The test is therefore *sufficient*, not tight: the result can
+be a little more accurate than asked, never less.
+
+The number of steps is bounded: because `q_k ≥ F_{k+1}`, reaching an absolute
+error of `10^-N` takes at most `⌊1.672 + 2.392·N⌋` iterations, and about `N` on
+average. Accuracy costs linear time, not explosive time.
+
+Unlike [`bestapprox`](@ref) the answer is always a convergent, never a
+semiconvergent — under an error budget the first convergent that clears the bar
+is already the shortest rational that does.
+"""
+function approxwithin(p::T, q::T, B::T) where {T<:Integer}
+    q == 0 && throw(DivideError())
+    if q < 0
+        p, q = -p, -q
+    end
+
+    hm1, hm2 = one(T), zero(T)
+    km1, km2 = zero(T), one(T)
+
+    W = widen(T)
+    x, y = p, q
+    while y != 0
+        a = fld(x, y)
+        x, y = y, x - a * y
+        h = a * hm1 + hm2
+        k = a * km1 + km2
+        # q_{k+1} is only known now, so this accepts the *previous* convergent.
+        if !iszero(km1) && W(km1) * W(k) >= W(B)
+            return (hm1, km1)
+        end
+        hm2, hm1 = hm1, h
+        km2, km1 = km1, k
+    end
+    return (hm1, km1)               # ran out of convergents: p/q was exact
+end
+
+approxwithin(p::Integer, q::Integer, B::Integer) = approxwithin(promote(p, q, B)...)
+
+function approxwithin(r::Rational{T}, B::Integer) where {T<:Integer}
+    n, d = approxwithin(numerator(r), denominator(r), T(B))
+    return n // d
+end

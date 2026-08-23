@@ -82,9 +82,34 @@ under a size budget the best convergent is often beaten by a semiconvergent
 with a larger, still-admissible denominator (`311//99` beats `22//7` for π at
 `N = 100`).
 
+Both are implemented. `SizeBound` is the default; `ErrorBound` gives you the
+paper's scheme:
+
+```julia
+setrounding!(ErrorBound(abstol = 1//10^8, threshold = 9))   # the paper's Δ, M
+setrounding!(ErrorBound(reltol = 1//10^12))                 # the paper's δ
+setrounding!(ErrorBound(abstol = 1//10^8, reltol = 1//10^8))  # both must hold
+
+with_rounding(ErrorBound(abstol = 1//10^20)) do
+    sum(ARational(1, k) for k in 1:1000)
+end
+```
+
+- `abstol` bounds `|rounded − exact|`, `reltol` bounds the relative error, and
+  `nothing` (the default for each) means that criterion is not applied — at
+  least one must be given. A tolerance of `0` means exact.
+- `threshold` is the paper's `M`: leave a result alone while both its parts
+  have at most that many decimal digits, so short exact fractions survive a
+  coarse tolerance.
+- Nothing caps the denominator here, and nothing needs to: an absolute
+  tolerance `Δ` holds denominators near `1/sqrt(Δ)`.
+
+`examples/demo.jl` reproduces Table 1 of the paper — the Taylor series for
+`sin(π/6 + 2πm)` with `π → 355/113` — and lands on the same numbers, including
+the way variant IV (relative error only) degrades into nonsense by `m = 4`.
+
 Bounding the size gives predictable memory and a fixed cost per operation;
-bounding the error gives a guarantee about the answer. Neither dominates. An
-error-controlled mode is not implemented yet.
+bounding the error gives a guarantee about each answer. Neither dominates.
 
 ## Precision control
 
@@ -106,7 +131,9 @@ end
 ```
 
 The bound is a plain denominator limit, so precision is continuous — any
-integer bound works, not just powers of two.
+integer bound works, not just powers of two. These all install a `SizeBound`;
+see [above](#relation-to-the-litvinovrodionovchourkin-scheme) for the
+error-controlled alternative, and `roundingscheme()` for what is active.
 
 ## What is supported
 
@@ -121,6 +148,8 @@ integer bound works, not just powers of two.
   just work.
 - `ARational(π)` and other irrationals.
 - `approxerror(x, exact)` to audit how much precision a computation lost.
+- Two rounding schemes, `SizeBound` and `ErrorBound`, switched globally with
+  `setrounding!` or scoped with `with_rounding`.
 
 ## Element types
 
@@ -170,6 +199,9 @@ Accuracy on that same sum, against the exact value:
 
 ## Caveats
 
+- **`maxdenominator()` and `precision(ARational)` only apply under
+  `SizeBound`.** They throw under `ErrorBound`, which has no size bound to
+  report. Use `roundingscheme()` when you need to branch on it.
 - **The bound is global mutable state.** That is what makes the arithmetic
   operators work without threading a precision argument through everything, and
   it is the same trade-off `BigFloat` makes. It also means it is not

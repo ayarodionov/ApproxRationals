@@ -99,6 +99,12 @@ end
     @test isinteger(ARational(10, 5))
     @test Rational(ARational(0.5)) == 1 // 2
     @test Float64(ARational(1, 4)) === 0.25
+    # parts far outside Float64's range, quotient well inside it
+    with_maxdenominator(big(10)^400) do
+        @test Float64(ARational(big(10)^400, big(10)^400 + 1)) == 1.0
+        @test Float64(ARational(big(2)^2000, big(2)^2001)) == 0.5
+        @test Float32(ARational(big(10)^300, big(10)^299)) == 10.0f0
+    end
     @test float(ARational(1, 8)) === 0.125
     @test ARational(ARational(1, 3)) == ARational(1, 3)
     @test_throws DivideError ARational(1, 0)
@@ -238,6 +244,144 @@ end
     setprecision(ARational, 64)
 end
 
+@testset "approxwithin" begin
+    piq = Rational{BigInt}(BigFloat(π, precision = 256))
+    # the guarantee is |err| <= 1/B, reached at the first convergent that clears it
+    for B in (10, 1000, 10^6, 10^12)
+        r = approxwithin(piq, B)
+        @test abs(r - piq) <= 1 // big(B)
+        @test r in convergents(piq)                 # never a semiconvergent
+    end
+    @test approxwithin(piq, 1000) == 333 // 106     # 22//7 is not accurate enough
+    @test approxwithin(3 // 4, 10^9) == 3 // 4      # exact when the CF runs out
+    @test approxwithin(0 // 1, 10^9) == 0 // 1
+    @test approxwithin(-piq, 10^6) == -approxwithin(piq, 10^6)
+
+    # every accepted convergent really is the first one meeting the bound
+    rng = MersenneTwister(1234)
+    for _ in 1:2000
+        p, q = rand(rng, Int64), rand(rng, 1:typemax(Int64))
+        B = rand(rng, 1:big(10)^20)
+        n, d = approxwithin(big(p), big(q), B)
+        @test abs(n // d - p // q) <= 1 // B
+        cs = convergents(big(p), big(q))
+        i = findfirst(==(n // d), cs)
+        @test i !== nothing
+        # It stops at the first convergent the q_k*q_{k+1} >= B bracket accepts.
+        # That bracket is sufficient, not tight, so an earlier convergent may
+        # happen to be accurate enough already — what must hold is that none of
+        # them satisfied the criterion being applied.
+        for j in 1:(i - 1)
+            @test denominator(cs[j]) * denominator(cs[j + 1]) < B
+        end
+        # Int128 agrees with BigInt whenever it can hold the bound
+        B <= typemax(Int128) && @test approxwithin(Int128(p), Int128(q), Int128(B)) == (n, d)
+    end
+end
+
+@testset "ErrorBound rounding" begin
+    # the promised absolute tolerance actually holds, operation by operation
+    for tol in (1 // big(10)^4, 1 // big(10)^10, 1 // big(10)^20)
+        with_rounding(ErrorBound(abstol = tol)) do
+            rng = MersenneTwister(99)
+            for _ in 1:300
+                p, q = rand(rng, -10^6:10^6), rand(rng, 1:10^6)
+                @test abs(approxerror(ARational(p, q), p // q)) <= tol
+            end
+            x = ARational(1)
+            for k in 2:200
+                x += ARational(1, k)
+            end
+            @test abs(approxerror(x, sum(1 // big(k) for k in 1:200))) < 200 * tol
+        end
+    end
+
+    # relative tolerance scales with the magnitude of the value
+    with_rounding(ErrorBound(reltol = 1 // big(10)^12)) do
+        for (p, q) in ((123456789, 7), (1, 10^9), (-98765, 4321))
+            x = ARational(p, q)
+            @test abs(approxerror(x, p // q)) <= abs(big(p) // big(q)) // big(10)^12
+        end
+    end
+
+    # both criteria must hold when both are given
+    with_rounding(ErrorBound(abstol = 1 // big(10)^6, reltol = 1 // big(10)^18)) do
+        x = ARational(1, 3)^3                      # small value: reltol is the binding one
+        @test abs(approxerror(x, 1 // 27)) <= (big(1) // 27) // big(10)^18
+    end
+
+    # a zero tolerance means exact
+    with_rounding(ErrorBound(abstol = 0)) do
+        x = sum(ARational(1, k) for k in 1:60)
+        @test Rational(x) == sum(1 // big(k) for k in 1:60)
+    end
+
+    # threshold protects short fractions from a coarse tolerance
+    with_rounding(ErrorBound(abstol = 1 // 2)) do
+        @test Rational(ARational(1, 3)) == 0 // 1
+    end
+    with_rounding(ErrorBound(abstol = 1 // 2, threshold = 3)) do
+        @test Rational(ARational(1, 3)) == 1 // 3
+        @test denominator(ARational(1, 100000)) < 100000   # too long to protect
+    end
+
+    # denominators stay bounded even though nothing caps them explicitly:
+    # an absolute tolerance holds them near 1/sqrt(abstol)
+    with_rounding(ErrorBound(abstol = 1 // big(10)^12)) do
+        x = ARational(1)
+        for k in 2:500
+            x += ARational(1, k)
+            @test denominator(x) < 10^8
+        end
+    end
+
+    # fixed-width element types still cannot overflow
+    with_rounding(ErrorBound(abstol = 1 // big(10)^40)) do
+        x = ARational{Int64}(1, 3)
+        for k in 2:100
+            x += ARational{Int64}(1, k)
+            @test denominator(x) <= typemax(Int64)
+        end
+        @test x isa ARational{Int64}
+    end
+
+    @test_throws ArgumentError ErrorBound()
+    @test_throws ArgumentError ErrorBound(abstol = -1)
+    @test_throws ArgumentError ErrorBound(abstol = 1e-8, threshold = -1)
+    @test ErrorBound(abstol = Inf, reltol = 1 // 10) isa ErrorBound
+end
+
+@testset "scheme switching" begin
+    setprecision(ARational, 64)
+    @test roundingscheme() isa SizeBound
+    @test maxdenominator() == big(2)^64
+
+    old = setrounding!(ErrorBound(abstol = 1 // big(10)^9))
+    @test old isa SizeBound
+    @test roundingscheme() isa ErrorBound
+    @test_throws ArgumentError maxdenominator()     # no size bound to report
+    @test_throws ArgumentError precision(ARational)
+
+    setrounding!(old)
+    @test maxdenominator() == big(2)^64
+
+    with_rounding(ErrorBound(abstol = 1 // big(10)^9)) do
+        @test roundingscheme() isa ErrorBound
+    end
+    @test roundingscheme() isa SizeBound
+    @test_throws ErrorException with_rounding(ErrorBound(abstol = 1)) do
+        error("boom")
+    end
+    @test roundingscheme() isa SizeBound            # restored after a throw
+
+    # elementary functions follow the active scheme
+    with_rounding(ErrorBound(abstol = 1 // big(10)^15)) do
+        @test abs(Float64(sqrt(ARational(2))) - sqrt(2)) < 1e-14
+        @test abs(Float64(exp(ARational(1))) - ℯ) < 1e-14
+    end
+    setprecision(ARational, 64)
+end
+
 @testset "precision control" begin
     old = setprecision(ARational, 20)
     @test maxdenominator() == big(2)^20
@@ -266,7 +410,7 @@ end
 
     @test_throws ArgumentError setmaxdenominator!(0)
     @test_throws ArgumentError setprecision(ARational, 0)
-    setprecision(ARational, old)
+    setrounding!(old)
 end
 
 @testset "fixed-width element types" begin
@@ -284,6 +428,21 @@ end
     setprecision(ARational, 40)
     w = ARational{Int32}(1, 3) + ARational{Int32}(1, 7)
     @test denominator(w) <= typemax(Int32)
+
+    # ...and so does the numerator, which for a value above 1 is the larger of
+    # the two. Capping only the denominator at typemax(T) overflowed here.
+    for (S, bits) in ((Int64, 62), (Int32, 30), (Int128, 126))
+        setprecision(ARational, bits)
+        v = ARational{S}(1)
+        for k in 2:200
+            v += ARational{S}(1, k)
+            @test denominator(v) <= typemax(S)
+            @test abs(numerator(v)) <= typemax(S)
+        end
+        @test Float64(v) ≈ sum(1 / k for k in 1:200)
+        big_v = ARational{S}(1000) * ARational{S}(1, 3)      # magnitude far above 1
+        @test abs(numerator(big_v)) <= typemax(S)
+    end
     setprecision(ARational, 64)
 end
 
