@@ -46,7 +46,8 @@ admissible convergent or the best *semiconvergent* below the bound, whichever
 is closer — decided by exact integer cross-multiplication, never by floating
 point.
 
-This makes the rounding **optimal**, not merely good: no rational with
+This is the rounding rule of Litvinov, Rodionov and Chourkin (see
+[References](#references)). It makes the rounding **optimal**, not merely good: no rational with
 denominator `≤ N` is strictly closer to the exact result. That is a stronger
 guarantee than binary floating point gives you, and it is why the
 approximations look like the ones humans use:
@@ -164,6 +165,20 @@ Accuracy on that same sum, against the exact value:
 - **Errors accumulate.** Each operation is individually optimal, but the bound
   is not an error bound on a whole computation. Ill-conditioned problems still
   need headroom.
+
+## References
+
+- Grigori Litvinov, Anatoli Rodionov, Andrei Chourkin, *Approximate rational
+  arithmetics and arbitrary precision computations* (2001).
+  [arXiv:math/0101152](https://arxiv.org/abs/math/0101152) — the scheme this
+  package implements: rational arithmetic in which the round-off
+  error, absolute or relative, is controlled by the user, with the rounding
+  performed through continued fraction expansions.
+- Grigori Litvinov, *Error autocorrection in rational approximation and interval
+  estimates (a survey of results)*, Open Mathematics **1**(1), 36–60 (2003).
+  [doi:10.2478/BF02475663](https://link.springer.com/article/10.2478/BF02475663)
+  — on why errors in rational approximation are often far smaller than a naive
+  accumulation argument predicts.
 
 ## Running
 
