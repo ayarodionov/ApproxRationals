@@ -46,8 +46,7 @@ admissible convergent or the best *semiconvergent* below the bound, whichever
 is closer — decided by exact integer cross-multiplication, never by floating
 point.
 
-This is the rounding rule of Litvinov, Rodionov and Chourkin (see
-[References](#references)). It makes the rounding **optimal**, not merely good: no rational with
+This makes the rounding **optimal**, not merely good: no rational with
 denominator `≤ N` is strictly closer to the exact result. That is a stronger
 guarantee than binary floating point gives you, and it is why the
 approximations look like the ones humans use:
@@ -63,6 +62,29 @@ julia> [bestapprox(Rational{BigInt}(BigFloat(π, precision=256)), N) for N in (1
 
 `355//113` is accurate to 2.7e-7 with a three-digit denominator; a float with
 the same storage cannot do better.
+
+### Relation to the Litvinov–Rodionov–Chourkin scheme
+
+The paper in the [References](#references) parameterises the same idea by
+*error* rather than by size: the user gives an absolute tolerance `Δ` and a
+relative tolerance `δ`, the continued fraction is truncated at the first
+convergent meeting them, and inequality `1/(q_k·(q_k + q_{k+1})) < |p/q −
+p_k/q_k| ≤ 1/(q_k·q_{k+1})` lets the error be checked without ever comparing
+against the unrounded number. That gives a per-operation error bound directly,
+and `Δ = δ = 0` recovers exact arithmetic.
+
+`ApproxRationals` bounds the denominator instead, which is the *fixed-slash*
+parameterisation of Matula and Kornerup. The two are duals — a size budget
+implies an error bound and vice versa — but they are not the same rounding, and
+the difference is exactly why semiconvergents appear here: under an error
+budget the first convergent that clears the bar is the right answer, whereas
+under a size budget the best convergent is often beaten by a semiconvergent
+with a larger, still-admissible denominator (`311//99` beats `22//7` for π at
+`N = 100`).
+
+Bounding the size gives predictable memory and a fixed cost per operation;
+bounding the error gives a guarantee about the answer. Neither dominates. An
+error-controlled mode is not implemented yet.
 
 ## Precision control
 
@@ -170,10 +192,19 @@ Accuracy on that same sum, against the exact value:
 
 - Grigori Litvinov, Anatoli Rodionov, Andrei Chourkin, *Approximate rational
   arithmetics and arbitrary precision computations* (2001).
-  [arXiv:math/0101152](https://arxiv.org/abs/math/0101152) — the scheme this
-  package implements: rational arithmetic in which the round-off
-  error, absolute or relative, is controlled by the user, with the rounding
-  performed through continued fraction expansions.
+  [arXiv:math/0101152](https://arxiv.org/abs/math/0101152) — rational
+  arithmetic in which the round-off error, absolute or relative, is controlled
+  by the user, with the rounding performed through continued fraction
+  expansions. The paper also bounds the work: for an absolute error `10^-N` the
+  number of continued-fraction steps is at most `⌊1.672 + 2.392·N⌋`, and on
+  average about `N`, so precision costs linear time rather than explosive time.
+  See [Relation to the Litvinov–Rodionov–Chourkin
+  scheme](#relation-to-the-litvinovrodionovchourkin-scheme) for how this
+  package differs.
+- D. W. Matula and P. Kornerup, *Finite precision rational arithmetic: slash
+  number systems*, IEEE Transactions on Computers **C-34**(1), 3–18 (1985) —
+  fixed-slash and floating-slash rationals, the family this package's
+  denominator bound belongs to.
 - Grigori Litvinov, *Error autocorrection in rational approximation and interval
   estimates (a survey of results)*, Open Mathematics **1**(1), 36–60 (2003).
   [doi:10.2478/BF02475663](https://link.springer.com/article/10.2478/BF02475663)
