@@ -170,6 +170,49 @@ Internally, `ARational{BigInt}` takes a machine fast path: when numerator and
 denominator both fit in an `Int128`, the whole reduce-and-round step runs in
 `Int128`, which is worth roughly 5–10x at 32–64 bits of precision.
 
+## Example: sin(x) by Taylor series
+
+`examples/sin_taylor.jl` is the case that makes the point sharpest. Summing
+
+    sin(x) = x − x³/3! + x⁵/5! − ...
+
+at `x = 50` passes through terms as large as `2.9e20` that must cancel down to
+an answer below 1 — about 68 bits of cancellation. The same generic function
+runs in every arithmetic:
+
+```julia
+function taylorsin(x::T; atol = 1e-25) where {T}
+    total, term, k = zero(x), x, 1
+    while abs(float(term)) >= atol && k < 400
+        total += term
+        k += 2
+        term = -term * x * x / T((k - 1) * k)
+    end
+    return total
+end
+
+taylorsin(Float64(50))                                     # -39110.458480393136
+setprecision(ARational, 53) do
+    Float64(taylorsin(ARational(50)))                      # -0.262374853703929
+end
+```
+
+`sin(50) = -0.262374853703929`. Float64 is wrong by `3.9e4`; the rational with
+denominators capped at `2^53` is correct to every digit shown. Both carry
+roughly 53 bits — the difference is what those bits are measured against.
+
+Capping the denominator at `N` bounds the *absolute* error, by about `1/(q·N)`,
+regardless of how large the value is. A float bounds the *relative* error.
+Cancellation destroys relative accuracy and leaves absolute accuracy alone, so
+the rational survives what the float cannot. The example measures this
+directly: the worst rounding error stays near `1e-29` whether the values have
+magnitude `1e0` or `1e40`.
+
+The same asymmetry shows up between the two error criteria —
+`ErrorBound(abstol = 1//10^20)` recovers `sin(50)` exactly, while
+`ErrorBound(reltol = 1//10^20)` is off by `2.1`, failing precisely the way
+Float64 does. That is variant IV of the paper's Table 1.
+
 ## Performance
 
 Harmonic sum `∑ 1/k`, exact `Rational{BigInt}` against `ARational` at 64 bits
