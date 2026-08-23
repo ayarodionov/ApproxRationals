@@ -4,3 +4,6 @@ Manifest.toml
 *.jl.*.cov
 *.jl.mem
 .DS_Store
+
+# papers and other binaries are linked from the README, not vendored
+*.pdf
